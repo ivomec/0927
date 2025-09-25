@@ -1,4 +1,3 @@
-rㅣ서 // Deployment test
 
 'use client';
 
