@@ -1,96 +1,54 @@
-
 import { NextResponse } from 'next/server';
-import admin from 'firebase-admin';
-
-// Helper function to write debug logs to a file in the project root
-const writeDebugLog = async (logData: any) => {
-  // We are in a serverless function environment, writing files is complex.
-  // We will rely on console.log and the user checking the terminal output.
-  // This function will just format and log to console.
-  console.log("--- DEBUG LOG ---");
-  console.log(JSON.stringify(logData, null, 2));
-  console.log("--- END DEBUG LOG ---");
-};
-
-
-// Helper function to initialize Firebase Admin SDK
-const initializeFirebaseAdmin = () => {
-  if (admin.apps.length > 0) {
-    return admin.app();
-  }
-  try {
-    admin.initializeApp({
-      credential: admin.credential.applicationDefault(),
-      storageBucket: 'chart0927-64ec7.firebasestorage.app',
-    });
-    return admin.app();
-  } catch (error: any) {
-    console.error('[CRITICAL] Firebase Admin initialization error:', error.message);
-    // Log initialization failure
-    writeDebugLog({ step: 'initializeFirebaseAdmin', status: 'FAILED', error: error.message });
-    return null;
-  }
-};
+// 1. 중앙 모듈에서 이미 초기화된 객체를 직접 import 합니다.
+import { storage, firestore } from '@/lib/firebase-admin';
 
 export async function POST(request: Request) {
-  const app = initializeFirebaseAdmin();
-
-  if (!app) {
-    return NextResponse.json({ success: false, error: 'Server configuration error. Firebase Admin SDK failed to initialize.' }, { status: 500 });
+  let data;
+  try {
+    data = await request.json();
+  } catch (error) {
+    return new NextResponse(JSON.stringify({ message: 'Invalid JSON body' }), { status: 400, headers: { 'Content-Type': 'application/json' } });
   }
 
-  const requestBody = await request.json();
-  const { patientId, collectionName, fileId, storagePath } = requestBody;
+  const { storagePath, patientId, collectionName, fileId } = data;
+  
+  if (!storagePath || !patientId || !collectionName || !fileId) {
+    return new NextResponse(JSON.stringify({ message: 'Missing required parameters' }), { status: 400, headers: { 'Content-Type': 'application/json' } });
+  }
 
-  const logPayload = {
-    timestamp: new Date().toISOString(),
-    requestBody: requestBody,
-    steps: [] as { step: string; status: string; path?: string; error?: string }[],
-  };
+  // 2. 이미 준비된 객체를 바로 사용합니다. 초기화 코드가 완전히 사라졌습니다.
+  const bucket = storage.bucket(); 
+  const fileRef = bucket.file(storagePath);
+  const docRef = firestore.collection('patients').doc(patientId).collection(collectionName).doc(fileId);
 
   try {
-    if (!patientId || !collectionName || !fileId || !storagePath) {
-      logPayload.steps.push({ step: 'validation', status: 'FAILED', error: 'Missing required parameters' });
-      await writeDebugLog(logPayload);
-      return NextResponse.json({ success: false, error: 'Missing required parameters' }, { status: 400 });
-    }
-    
-    logPayload.steps.push({ step: 'validation', status: 'SUCCESS' });
+    // Promise.allSettled를 사용하여 스토리지와 파이어스토어 삭제를 동시에 시도합니다.
+    const [storageResult, firestoreResult] = await Promise.allSettled([
+      fileRef.delete(),
+      docRef.delete()
+    ]);
 
-    const db = admin.firestore();
-    const bucket = admin.storage().bucket();
-
-    // --- Critical Step: Delete the Firestore document first ---
-    const fileDocRef = db.collection('patients').doc(patientId).collection(collectionName).doc(fileId);
-    
-    try {
-        await fileDocRef.delete();
-        logPayload.steps.push({ step: 'firestoreDelete', status: 'SUCCESS', path: fileDocRef.path });
-    } catch (firestoreError: any) {
-        logPayload.steps.push({ step: 'firestoreDelete', status: 'FAILED', path: fileDocRef.path, error: firestoreError.message });
-        await writeDebugLog(logPayload);
-        throw new Error(`Firestore document deletion failed: ${firestoreError.message}`);
-    }
-
-    // --- Secondary Step: Attempt to delete the file from storage ---
-    try {
-      const file = bucket.file(storagePath);
-      await file.delete();
-      logPayload.steps.push({ step: 'storageDelete', status: 'SUCCESS', path: storagePath });
-    } catch (storageError: any) {
-      if (storageError.code === 404) {
-        logPayload.steps.push({ step: 'storageDelete', status: 'NOT_FOUND', path: storagePath, error: 'File not in storage, which is acceptable.' });
-      } else {
-        logPayload.steps.push({ step: 'storageDelete', status: 'WARNING', path: storagePath, error: storageError.message });
+    const errors = [];
+    if (storageResult.status === 'rejected') {
+      // 스토리지 파일이 이미 없는 경우(404)는 성공으로 간주합니다.
+      if ((storageResult.reason as any).code !== 404) {
+        errors.push(`Storage deletion failed: ${storageResult.reason.message}`);
       }
     }
+    if (firestoreResult.status === 'rejected') {
+      errors.push(`Firestore deletion failed: ${firestoreResult.reason.message}`);
+    }
 
-    await writeDebugLog(logPayload);
-    return NextResponse.json({ success: true, message: 'File record deleted. See server logs for details.' });
+    if (errors.length > 0) {
+      // 일부 작업이 실패했더라도, 심각한 오류로 간주하고 로그를 남깁니다.
+      console.error('Partial failure during deletion:', errors.join('; '));
+      return new NextResponse(JSON.stringify({ success: false, message: `Partial failure: ${errors.join('; ')}` }), { status: 500 });
+    }
 
-  } catch (error: any) {
-    logPayload.steps.push({ step: 'overallCatch', status: 'CRITICAL_FAILURE', error: error.message });
-    await writeDebugLog(logPayload);
-    return NextResponse.json({ success: false, error: `Critical failure: ${error.message}` }, { status: 500 });
+    return new NextResponse(JSON.stringify({ success: true, message: 'File and document deleted successfully.' }), { status: 200 });
+    
+  } catch (e: any) {
+    console.error('Critical error during file deletion process:', e.message);
+    return new NextResponse(JSON.stringify({ success: false, message: `An unexpected error occurred: ${e.message}` }), { status: 500 });
   }
 }
