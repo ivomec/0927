@@ -79,7 +79,7 @@ export default function PatientDetailView({ patientId }: { patientId: string }) 
     costs, setCosts,
     sodalimeRecord,
     isLoading,
-    images
+    images, setImages
   } = usePatient(patientId);
   
   const [saveStatus, setSaveStatus] = useState<SaveStatus>('idle');
@@ -363,6 +363,7 @@ export default function PatientDetailView({ patientId }: { patientId: string }) 
             <ImageGalleryCard 
                 patientId={patientId} 
                 images={images} 
+                setImages={setImages}
                 openImageViewer={openImageViewer}
             />
             <CostInfoCard 

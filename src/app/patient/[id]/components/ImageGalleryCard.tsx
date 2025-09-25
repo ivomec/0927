@@ -2,7 +2,7 @@
 'use client';
 
 import * as React from 'react';
-import { collection, addDoc, serverTimestamp, query, orderBy, onSnapshot } from 'firebase/firestore';
+import { collection, addDoc, serverTimestamp } from 'firebase/firestore';
 import { ref, uploadBytesResumable, getDownloadURL } from 'firebase/storage';
 import { db, storage } from '@/lib/firebase';
 import { useToast } from '@/hooks/use-toast';
@@ -23,12 +23,13 @@ import type { Timestamp } from 'firebase/firestore';
 interface ImageGalleryCardProps {
   patientId: string;
   images: ImageRecord[];
+  setImages: (images: ImageRecord[]) => void; // 부모의 상태를 직접 업데이트하는 함수
   openImageViewer: (images: ImageRecord[], startIndex: number) => void;
 }
 
 type ImageCategory = 'general' | 'pre-surgery' | 'post-surgery';
 
-const ImageGalleryCard: React.FC<ImageGalleryCardProps> = ({ patientId, images, openImageViewer }) => {
+const ImageGalleryCard: React.FC<ImageGalleryCardProps> = ({ patientId, images, setImages, openImageViewer }) => {
   const [isUploading, setIsUploading] = React.useState(false);
   const [uploadProgress, setUploadProgress] = React.useState(0);
   const fileInputRef = React.useRef<HTMLInputElement>(null);
@@ -55,30 +56,43 @@ const ImageGalleryCard: React.FC<ImageGalleryCardProps> = ({ patientId, images, 
     setUploadProgress(0);
     const filesArray = Array.from(files);
 
-    filesArray.forEach(file => {
-      const filePath = `images/${patientId}/${category}/${Date.now()}_${file.name}`;
+    const uploadPromises = filesArray.map(file => {
+      const sanitizedFileName = file.name.replace(/[^a-zA-Z0-9\uAC00-\uD7A3_.-]/g, '_');
+      const filePath = `images/${patientId}/${category}/${Date.now()}_${sanitizedFileName}`;
       const storageRef = ref(storage, filePath);
       const uploadTask = uploadBytesResumable(storageRef, file);
-  
-      uploadTask.on('state_changed', (snapshot) => {
-        const progress = (snapshot.bytesTransferred / snapshot.totalBytes) * 100;
-        setUploadProgress(progress);
-      }, (error) => {
-        console.error('Upload failed:', error);
-        toast({ title: '업로드 실패', description: `${file.name} 업로드 중 오류 발생`, variant: 'destructive' });
-        setIsUploading(false);
-      }, async () => {
-        const downloadURL = await getDownloadURL(uploadTask.snapshot.ref);
-        await addDoc(collection(db, 'patients', patientId, 'images'), {
-          imageUrl: downloadURL,
-          storagePath: filePath,
-          category: category,
-          uploadedAt: serverTimestamp(),
+      
+      return new Promise<void>((resolve, reject) => {
+        uploadTask.on('state_changed', (snapshot) => {
+          const progress = (snapshot.bytesTransferred / snapshot.totalBytes) * 100;
+          setUploadProgress(progress); // 개별 진행률 대신 전체 진행률을 표시하려면 로직 수정 필요
+        }, (error) => {
+          console.error('Upload failed:', error);
+          toast({ title: '업로드 실패', description: `${file.name} 업로드 중 오류 발생`, variant: 'destructive' });
+          reject(error);
+        }, async () => {
+          const downloadURL = await getDownloadURL(uploadTask.snapshot.ref);
+          await addDoc(collection(db, 'patients', patientId, 'images'), {
+            imageUrl: downloadURL,
+            storagePath: filePath,
+            category: category,
+            uploadedAt: serverTimestamp(),
+          });
+          toast({ title: '성공', description: `${file.name}이(가) 업로드되었습니다.` });
+          resolve();
         });
-        toast({ title: '성공', description: `${file.name}이(가) 업로드되었습니다.` });
-        setIsUploading(false);
       });
     });
+
+    Promise.all(uploadPromises)
+      .catch(() => {
+        // 하나라도 실패하면 전체 업로드 상태를 false로 설정
+        setIsUploading(false);
+      })
+      .finally(() => {
+        // 모든 업로드가 완료되면 (성공 또는 실패) 상태를 false로 설정
+        setIsUploading(false);
+      });
   };
 
   const handleDrag = (e: React.DragEvent) => {
@@ -108,7 +122,15 @@ const ImageGalleryCard: React.FC<ImageGalleryCardProps> = ({ patientId, images, 
 
   const handleDelete = async () => {
     if (!imageToDelete) return;
-  
+
+    // 1. 롤백을 대비해 현재 이미지 목록을 백업
+    const originalImages = images;
+
+    // 2. 부모의 상태를 즉시 업데이트!
+    const newImages = images.filter(image => image.id !== imageToDelete.id);
+    setImages(newImages);
+
+    // 3. 백그라운드에서 서버에 실제 삭제 요청
     try {
       const response = await fetch('/api/deleteFile', {
         method: 'POST',
@@ -120,15 +142,18 @@ const ImageGalleryCard: React.FC<ImageGalleryCardProps> = ({ patientId, images, 
           storagePath: imageToDelete.storagePath,
         }),
       });
-  
+
       if (!response.ok) {
         const errorData = await response.json().catch(() => ({ error: 'Server error' }));
         throw new Error(errorData.error || `Server responded with ${response.status}`);
       }
-  
+
+      // 4. 서버 요청까지 성공하면, 성공 메시지 표시 (부모 데이터는 이미 최신)
       toast({ title: '성공', description: '파일이 삭제되었습니다.' });
+
     } catch (error: any) {
-      console.error("Error deleting file: ", error);
+      // 5. 롤백(Rollback): 삭제가 실패했으므로, 부모의 상태를 백업해둔 목록으로 되돌림
+      setImages(originalImages);
       toast({ title: '오류', description: error.message || '파일 삭제 중 오류가 발생했습니다.', variant: 'destructive' });
     } finally {
       setDeleteAlertOpen(false);
@@ -241,5 +266,3 @@ const ImageGalleryCard: React.FC<ImageGalleryCardProps> = ({ patientId, images, 
 };
 
 export default React.memo(ImageGalleryCard);
-
-    

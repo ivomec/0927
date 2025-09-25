@@ -1,8 +1,6 @@
-
-
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import { doc, onSnapshot, Timestamp, collection, query, orderBy } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
@@ -22,12 +20,27 @@ export default function usePatient(patientId: string) {
 
   const [isLoading, setIsLoading] = useState(true);
   const [sodalimeRecord, setSodalimeRecord] = useState<SodalimeRecord | null>(null);
-  
+
   const router = useRouter();
   const { toast } = useToast();
 
+  // Use a ref to track initial image load to prevent race conditions with optimistic updates
+  const isInitialImageLoad = useRef(true);
+
   useEffect(() => {
-    if (!patientId) return;
+    if (!patientId) {
+        setIsLoading(false);
+        return;
+    };
+
+    let isPatientDataLoaded = false;
+    let isImagesDataLoaded = false;
+
+    const updateLoadingState = () => {
+        if (isPatientDataLoaded && isImagesDataLoaded) {
+            setIsLoading(false);
+        }
+    };
 
     const patientDocRef = doc(db, 'patients', patientId);
     const unsubscribePatient = onSnapshot(patientDocRef, (docSnap) => {
@@ -42,12 +55,16 @@ export default function usePatient(patientId: string) {
         setCosts(patientData.costs || { procedure: 0, additional: 0, anesthesia: 0, checkup: 0 });
         setAnalysisResult(patientData.analysisResult || null);
         setAnalysisText(patientData.analysisText || '');
-        
-        setIsLoading(false);
+
+        if (!isPatientDataLoaded) {
+            isPatientDataLoaded = true;
+            updateLoadingState();
+        }
+
       } else {
         toast({ title: '오류', description: '환자를 찾을 수 없습니다.', variant: 'destructive' });
         router.push('/');
-        setIsLoading(false);
+        setIsLoading(false); // Stop loading if patient not found
       }
     }, (error) => {
       console.error('Error fetching patient data: ', error);
@@ -63,11 +80,47 @@ export default function usePatient(patientId: string) {
     const imagesCollectionRef = collection(db, 'patients', patientId, 'images');
     const qImages = query(imagesCollectionRef, orderBy('uploadedAt', 'desc'));
     const unsubscribeImages = onSnapshot(qImages, (snapshot) => {
-      const imagesList = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as ImageRecord));
-      setImages(imagesList);
+      if (isInitialImageLoad.current) {
+        // First load: set the entire list
+        const imagesList = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as ImageRecord));
+        setImages(imagesList);
+        isInitialImageLoad.current = false;
+
+        if (!isImagesDataLoaded) {
+            isImagesDataLoaded = true;
+            updateLoadingState();
+        }
+      } else {
+        // Subsequent updates: apply changes granularly
+        snapshot.docChanges().forEach((change) => {
+          const docData = { id: change.doc.id, ...change.doc.data() } as ImageRecord;
+          if (change.type === "added") {
+              // Add only if it doesn't already exist (handles optimistic add edge cases)
+              setImages(prevImages => {
+                if (prevImages.some(img => img.id === docData.id)) {
+                  return prevImages;
+                }
+                const newArray = [docData, ...prevImages];
+                newArray.sort((a, b) => ((b.uploadedAt as Timestamp)?.toMillis() || 0) - ((a.uploadedAt as Timestamp)?.toMillis() || 0));
+                return newArray;
+              });
+          }
+          if (change.type === "modified") {
+              setImages(prevImages => prevImages.map(img => (img.id === docData.id ? docData : img)));
+          }
+          if (change.type === "removed") {
+              // This handles deletions from other clients/backend
+              setImages(prevImages => prevImages.filter(img => img.id !== docData.id));
+          }
+        });
+      }
     }, (error) => {
       console.error("Error listening to images collection:", error);
       toast({ title: '오류', description: '이미지를 실시간으로 불러오지 못했습니다.', variant: 'destructive' });
+      if (!isImagesDataLoaded) {
+        isImagesDataLoaded = true;
+        updateLoadingState();
+      }
     });
 
     return () => {
@@ -75,7 +128,8 @@ export default function usePatient(patientId: string) {
       unsubscribeSodalime();
       unsubscribeImages();
     };
-  }, [patientId, toast, router]);
+    // The dependency array is stable and not cause re-runs that wipe state.
+  }, [patientId, router, toast]);
 
   return {
     patient,

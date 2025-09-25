@@ -2,23 +2,32 @@
 import { NextResponse } from 'next/server';
 import admin from 'firebase-admin';
 
+// Helper function to write debug logs to a file in the project root
+const writeDebugLog = async (logData: any) => {
+  // We are in a serverless function environment, writing files is complex.
+  // We will rely on console.log and the user checking the terminal output.
+  // This function will just format and log to console.
+  console.log("--- DEBUG LOG ---");
+  console.log(JSON.stringify(logData, null, 2));
+  console.log("--- END DEBUG LOG ---");
+};
+
+
 // Helper function to initialize Firebase Admin SDK
 const initializeFirebaseAdmin = () => {
-  // Check if the app is already initialized to prevent errors
   if (admin.apps.length > 0) {
     return admin.app();
   }
-
   try {
-    // Use application default credentials and explicitly set the bucket.
     admin.initializeApp({
       credential: admin.credential.applicationDefault(),
-      storageBucket: 'animal-clinic-assistant.firebasestorage.app',
+      storageBucket: 'chart0927-64ec7.firebasestorage.app',
     });
     return admin.app();
   } catch (error: any) {
-    console.error('Firebase Admin initialization error:', error.message);
-    // Return null if initialization fails, which will be handled in the API route
+    console.error('[CRITICAL] Firebase Admin initialization error:', error.message);
+    // Log initialization failure
+    writeDebugLog({ step: 'initializeFirebaseAdmin', status: 'FAILED', error: error.message });
     return null;
   }
 };
@@ -26,41 +35,62 @@ const initializeFirebaseAdmin = () => {
 export async function POST(request: Request) {
   const app = initializeFirebaseAdmin();
 
-  // If initialization fails, return a clear server configuration error.
   if (!app) {
     return NextResponse.json({ success: false, error: 'Server configuration error. Firebase Admin SDK failed to initialize.' }, { status: 500 });
   }
 
-  try {
-    const { patientId, collectionName, fileId, storagePath } = await request.json();
+  const requestBody = await request.json();
+  const { patientId, collectionName, fileId, storagePath } = requestBody;
 
+  const logPayload = {
+    timestamp: new Date().toISOString(),
+    requestBody: requestBody,
+    steps: [] as { step: string; status: string; path?: string; error?: string }[],
+  };
+
+  try {
     if (!patientId || !collectionName || !fileId || !storagePath) {
+      logPayload.steps.push({ step: 'validation', status: 'FAILED', error: 'Missing required parameters' });
+      await writeDebugLog(logPayload);
       return NextResponse.json({ success: false, error: 'Missing required parameters' }, { status: 400 });
     }
     
+    logPayload.steps.push({ step: 'validation', status: 'SUCCESS' });
+
     const db = admin.firestore();
     const bucket = admin.storage().bucket();
 
-    // Delete from Firestore
+    // --- Critical Step: Delete the Firestore document first ---
     const fileDocRef = db.collection('patients').doc(patientId).collection(collectionName).doc(fileId);
-    await fileDocRef.delete();
-
-    // Delete from Storage
-    const file = bucket.file(storagePath);
     
-    // Attempt to delete. If the file doesn't exist, it's not a critical error.
-    await file.delete().catch(error => {
-        if (error.code === 404) {
-            console.warn(`File not found in Storage during deletion, but proceeding: ${storagePath}`);
-        } else {
-            // For other errors, re-throw to be caught by the outer catch block.
-            throw error;
-        }
-    });
+    try {
+        await fileDocRef.delete();
+        logPayload.steps.push({ step: 'firestoreDelete', status: 'SUCCESS', path: fileDocRef.path });
+    } catch (firestoreError: any) {
+        logPayload.steps.push({ step: 'firestoreDelete', status: 'FAILED', path: fileDocRef.path, error: firestoreError.message });
+        await writeDebugLog(logPayload);
+        throw new Error(`Firestore document deletion failed: ${firestoreError.message}`);
+    }
 
-    return NextResponse.json({ success: true });
+    // --- Secondary Step: Attempt to delete the file from storage ---
+    try {
+      const file = bucket.file(storagePath);
+      await file.delete();
+      logPayload.steps.push({ step: 'storageDelete', status: 'SUCCESS', path: storagePath });
+    } catch (storageError: any) {
+      if (storageError.code === 404) {
+        logPayload.steps.push({ step: 'storageDelete', status: 'NOT_FOUND', path: storagePath, error: 'File not in storage, which is acceptable.' });
+      } else {
+        logPayload.steps.push({ step: 'storageDelete', status: 'WARNING', path: storagePath, error: storageError.message });
+      }
+    }
+
+    await writeDebugLog(logPayload);
+    return NextResponse.json({ success: true, message: 'File record deleted. See server logs for details.' });
+
   } catch (error: any) {
-    console.error('Error in deleteFile API route:', error);
-    return NextResponse.json({ success: false, error: error.message || 'Internal Server Error' }, { status: 500 });
+    logPayload.steps.push({ step: 'overallCatch', status: 'CRITICAL_FAILURE', error: error.message });
+    await writeDebugLog(logPayload);
+    return NextResponse.json({ success: false, error: `Critical failure: ${error.message}` }, { status: 500 });
   }
 }

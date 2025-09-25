@@ -3,7 +3,6 @@
 import { initializeApp, getApps, getApp } from 'firebase/app';
 import { getFirestore } from 'firebase/firestore';
 import { getStorage } from 'firebase/storage';
-import { getAuth, signInAnonymously, signOut } from 'firebase/auth'; // 인증 관련 함수 추가
 
 // Your web app's Firebase configuration
 const firebaseConfig = {
@@ -20,26 +19,5 @@ const app = !getApps().length ? initializeApp(firebaseConfig) : getApp();
 
 const db = getFirestore(app);
 const storage = getStorage(app);
-const auth = getAuth(app); // auth 객체 생성
 
-// 익명 로그인 함수
-const signIn = async () => {
-  try {
-    await signInAnonymously(auth);
-    console.log('익명 로그인 성공');
-  } catch (error) {
-    console.error("익명 로그인 실패:", error);
-  }
-};
-
-// 로그아웃 함수
-const logOut = async () => {
-  try {
-    await signOut(auth);
-    console.log('로그아웃 성공');
-  } catch (error) {
-    console.error("로그아웃 실패:", error);
-  }
-}
-
-export { app, db, storage, auth, signIn, logOut }; // auth, signIn, logOut export 추가
+export { app, db, storage };
