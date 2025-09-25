@@ -10,18 +10,7 @@
       "**/node_modules/**"
     ],
     "frameworksBackend": {
-      "id": "chart0927"
+      "region": "us-central1"
     }
-  },
-  "apphosting": {
-    "backendId": "chart0927",
-    "rootDir": "/",
-    "ignore": [
-      "node_modules",
-      ".git",
-      "firebase-debug.log",
-      "firebase-debug.*.log",
-      "functions"
-    ]
   }
 }
