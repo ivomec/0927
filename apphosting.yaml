@@ -4,6 +4,10 @@
 runConfig:
   minInstances: 0
 
+# Tells App Hosting to use the Next.js build preset.
+build:
+  preset: nextjs
+
 # Environment variables and secrets.
 env:
   - variable: NEXT_PUBLIC_FIREBASE_API_KEY
